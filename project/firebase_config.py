@@ -21,14 +21,38 @@ def initialize_firebase():
             print("Firebase not initialized, starting initialization...")
             
             # Try to get Firebase credentials from Streamlit secrets first
-            if 'firebase' in st.secrets:
+            if hasattr(st, 'secrets') and 'firebase' in st.secrets:
                 print("Found Firebase credentials in Streamlit secrets")
-                # Convert the secrets to a dictionary
-                firebase_config = dict(st.secrets['firebase'])
-                # Ensure private_key is properly formatted
-                if isinstance(firebase_config['private_key'], str):
-                    firebase_config['private_key'] = firebase_config['private_key'].replace('\\n', '\n')
-                print("Successfully processed Firebase credentials")
+                try:
+                    # Handle TOML format secrets
+                    firebase_secrets = st.secrets['firebase']
+                    firebase_config = {
+                        "type": firebase_secrets.get("type", "service_account"),
+                        "project_id": firebase_secrets.get("project_id"),
+                        "private_key_id": firebase_secrets.get("private_key_id"),
+                        "private_key": firebase_secrets.get("private_key", "").replace('\\n', '\n'),
+                        "client_email": firebase_secrets.get("client_email"),
+                        "client_id": firebase_secrets.get("client_id"),
+                        "auth_uri": firebase_secrets.get("auth_uri", "https://accounts.google.com/o/oauth2/auth"),
+                        "token_uri": firebase_secrets.get("token_uri", "https://oauth2.googleapis.com/token"),
+                        "auth_provider_x509_cert_url": firebase_secrets.get("auth_provider_x509_cert_url", "https://www.googleapis.com/oauth2/v1/certs"),
+                        "client_x509_cert_url": firebase_secrets.get("client_x509_cert_url")
+                    }
+                    
+                    # Validate required fields
+                    required_fields = ["project_id", "private_key", "client_email"]
+                    missing_fields = [field for field in required_fields if not firebase_config.get(field)]
+                    
+                    if missing_fields:
+                        print(f"Missing required Firebase fields in secrets: {missing_fields}")
+                        raise ValueError(f"Missing required Firebase configuration: {missing_fields}")
+                    
+                    print("Successfully processed Firebase credentials from secrets")
+                    
+                except Exception as secrets_error:
+                    print(f"Error processing Firebase secrets: {secrets_error}")
+                    raise secrets_error
+                    
             else:
                 print("No Firebase credentials in Streamlit secrets, checking environment variables")
                 # Check if all required environment variables are present
@@ -49,15 +73,15 @@ def initialize_firebase():
                 
                 # Fallback to environment variables for local development
                 firebase_config = {
-                    "type": os.getenv("FIREBASE_TYPE"),
+                    "type": os.getenv("FIREBASE_TYPE", "service_account"),
                     "project_id": os.getenv("FIREBASE_PROJECT_ID"),
                     "private_key_id": os.getenv("FIREBASE_PRIVATE_KEY_ID"),
-                    "private_key": os.getenv("FIREBASE_PRIVATE_KEY").replace("\\n", "\n"),
+                    "private_key": os.getenv("FIREBASE_PRIVATE_KEY", "").replace("\\n", "\n"),
                     "client_email": os.getenv("FIREBASE_CLIENT_EMAIL"),
                     "client_id": os.getenv("FIREBASE_CLIENT_ID"),
-                    "auth_uri": os.getenv("FIREBASE_AUTH_URI"),
-                    "token_uri": os.getenv("FIREBASE_TOKEN_URI"),
-                    "auth_provider_x509_cert_url": os.getenv("FIREBASE_AUTH_PROVIDER_CERT_URL"),
+                    "auth_uri": os.getenv("FIREBASE_AUTH_URI", "https://accounts.google.com/o/oauth2/auth"),
+                    "token_uri": os.getenv("FIREBASE_TOKEN_URI", "https://oauth2.googleapis.com/token"),
+                    "auth_provider_x509_cert_url": os.getenv("FIREBASE_AUTH_PROVIDER_CERT_URL", "https://www.googleapis.com/oauth2/v1/certs"),
                     "client_x509_cert_url": os.getenv("FIREBASE_CLIENT_CERT_URL")
                 }
             
@@ -65,7 +89,7 @@ def initialize_firebase():
             cred_path = "firebase-credentials.json"
             print(f"Creating temporary credentials file: {cred_path}")
             with open(cred_path, 'w') as f:
-                json.dump(firebase_config, f)
+                json.dump(firebase_config, f, indent=2)
             
             # Initialize Firebase with the credentials file
             print("Initializing Firebase with credentials...")
@@ -76,6 +100,7 @@ def initialize_firebase():
             print("Cleaning up temporary credentials file")
             os.remove(cred_path)
             print("Firebase initialization successful!")
+            st.success("✅ Firebase connected successfully!")
             return True
         print("Firebase already initialized")
         return True
