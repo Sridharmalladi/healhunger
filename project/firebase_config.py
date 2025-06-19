@@ -9,6 +9,9 @@ from dotenv import load_dotenv
 # Load environment variables (for local development)
 load_dotenv()
 
+# In-memory storage for development/testing when Firebase is not available
+_memory_storage = []
+
 def initialize_firebase():
     """Initialize Firebase if not already initialized"""
     try:
@@ -16,6 +19,7 @@ def initialize_firebase():
         # Check if Firebase is already initialized
         if not firebase_admin._apps:
             print("Firebase not initialized, starting initialization...")
+            
             # Try to get Firebase credentials from Streamlit secrets first
             if 'firebase' in st.secrets:
                 print("Found Firebase credentials in Streamlit secrets")
@@ -27,6 +31,22 @@ def initialize_firebase():
                 print("Successfully processed Firebase credentials")
             else:
                 print("No Firebase credentials in Streamlit secrets, checking environment variables")
+                # Check if all required environment variables are present
+                required_env_vars = [
+                    "FIREBASE_TYPE", "FIREBASE_PROJECT_ID", "FIREBASE_PRIVATE_KEY_ID",
+                    "FIREBASE_PRIVATE_KEY", "FIREBASE_CLIENT_EMAIL", "FIREBASE_CLIENT_ID",
+                    "FIREBASE_AUTH_URI", "FIREBASE_TOKEN_URI", "FIREBASE_AUTH_PROVIDER_CERT_URL",
+                    "FIREBASE_CLIENT_CERT_URL"
+                ]
+                
+                missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+                
+                if missing_vars:
+                    print(f"Missing Firebase environment variables: {missing_vars}")
+                    print("Firebase not available - using in-memory storage for development")
+                    st.warning("⚠️ Firebase not configured. Using temporary in-memory storage. Data will not persist between sessions.")
+                    return False
+                
                 # Fallback to environment variables for local development
                 firebase_config = {
                     "type": os.getenv("FIREBASE_TYPE"),
@@ -64,7 +84,7 @@ def initialize_firebase():
         print(f"Error type: {type(e)}")
         import traceback
         print(f"Traceback: {traceback.format_exc()}")
-        st.error(f"Firebase initialization error: {str(e)}")
+        st.warning("⚠️ Firebase not available. Using temporary in-memory storage. Data will not persist between sessions.")
         return False
 
 def verify_user(id_file):
@@ -77,35 +97,61 @@ def verify_user(id_file):
         return False
 
 def save_food_post(post_data):
-    """Save food post data to Firebase"""
+    """Save food post data to Firebase or memory storage"""
     try:
         print(f"Attempting to save food post: {post_data}")
-        db = firestore.client()
-        # Add timestamp if not present
-        if 'timestamp' not in post_data:
-            post_data['timestamp'] = datetime.now().isoformat()
         
-        # Add to Firestore
-        doc_ref = db.collection('food_posts').add(post_data)
-        print(f"Successfully saved food post with ID: {doc_ref[1].id}")
-        return True
+        # Try Firebase first
+        if firebase_admin._apps:
+            db = firestore.client()
+            # Add timestamp if not present
+            if 'timestamp' not in post_data:
+                post_data['timestamp'] = datetime.now().isoformat()
+            
+            # Add to Firestore
+            doc_ref = db.collection('food_posts').add(post_data)
+            print(f"Successfully saved food post to Firebase with ID: {doc_ref[1].id}")
+            return True
+        else:
+            # Use in-memory storage as fallback
+            print("Firebase not available, using in-memory storage")
+            if 'timestamp' not in post_data:
+                post_data['timestamp'] = datetime.now().isoformat()
+            
+            # Add unique ID for in-memory storage
+            post_data['id'] = f"mem_{len(_memory_storage)}_{int(datetime.now().timestamp())}"
+            _memory_storage.append(post_data)
+            print(f"Successfully saved food post to memory storage with ID: {post_data['id']}")
+            return True
+            
     except Exception as e:
         print(f"Error saving post: {str(e)}")
         st.error(f"Error saving post: {str(e)}")
         return False
 
 def get_all_food_posts():
-    """Get all food posts from Firebase"""
+    """Get all food posts from Firebase or memory storage"""
     try:
         print("\n=== Fetching Food Posts ===")
         print("Attempting to fetch all food posts")
-        db = firestore.client()
-        posts = db.collection('food_posts').stream()
-        post_list = [post.to_dict() for post in posts]
-        print(f"Successfully fetched {len(post_list)} food posts")
-        if len(post_list) > 0:
-            print("Sample post data:", post_list[0])
-        return post_list
+        
+        # Try Firebase first
+        if firebase_admin._apps:
+            db = firestore.client()
+            posts = db.collection('food_posts').stream()
+            post_list = [post.to_dict() for post in posts]
+            print(f"Successfully fetched {len(post_list)} food posts from Firebase")
+            if len(post_list) > 0:
+                print("Sample post data:", post_list[0])
+            return post_list
+        else:
+            # Use in-memory storage as fallback
+            print("Firebase not available, using in-memory storage")
+            print(f"Successfully fetched {len(_memory_storage)} food posts from memory")
+            if len(_memory_storage) > 0:
+                print("Sample post data:", _memory_storage[0])
+            return _memory_storage.copy()
+            
     except Exception as e:
         print(f"Error fetching posts: {str(e)}")
         print(f"Error type: {type(e)}")
@@ -117,20 +163,92 @@ def get_all_food_posts():
 def delete_expired_posts():
     """Delete posts that are past their expiry time"""
     try:
-        db = firestore.client()
         current_time = datetime.now()
         
-        # Get all posts
-        posts = db.collection('food_posts').stream()
-        
-        for post in posts:
-            post_data = post.to_dict()
-            if 'timestamp' in post_data and 'expiry_hours' in post_data:
-                post_time = datetime.fromisoformat(post_data['timestamp'])
-                expiry_time = post_time + timedelta(hours=post_data['expiry_hours'])
+        # Try Firebase first
+        if firebase_admin._apps:
+            db = firestore.client()
+            posts = db.collection('food_posts').stream()
+            
+            for post in posts:
+                post_data = post.to_dict()
+                if 'timestamp' in post_data and 'expiry_hours' in post_data:
+                    post_time = datetime.fromisoformat(post_data['timestamp'])
+                    expiry_time = post_time + timedelta(hours=post_data['expiry_hours'])
+                    
+                    if current_time > expiry_time:
+                        # Delete expired post
+                        db.collection('food_posts').document(post.id).delete()
+                        print(f"Deleted expired post from Firebase: {post.id}")
+        else:
+            # Use in-memory storage as fallback
+            global _memory_storage
+            original_count = len(_memory_storage)
+            _memory_storage = [
+                post for post in _memory_storage
+                if not (
+                    'timestamp' in post and 'expiry_hours' in post and
+                    current_time > datetime.fromisoformat(post['timestamp']) + timedelta(hours=post['expiry_hours'])
+                )
+            ]
+            deleted_count = original_count - len(_memory_storage)
+            if deleted_count > 0:
+                print(f"Deleted {deleted_count} expired posts from memory storage")
                 
-                if current_time > expiry_time:
-                    # Delete expired post
-                    db.collection('food_posts').document(post.id).delete()
     except Exception as e:
+        print(f"Error deleting expired posts: {str(e)}")
         st.error(f"Error deleting expired posts: {str(e)}")
+
+def add_sample_data():
+    """Add sample food posts for testing when Firebase is not available"""
+    if not firebase_admin._apps and len(_memory_storage) == 0:
+        print("Adding sample data for testing...")
+        sample_posts = [
+            {
+                "name": "Green Plate Cafe",
+                "contact": "+1234567890",
+                "food_type": "Vegetable Biryani",
+                "quantity": 15,
+                "address": "123 Main Street, New York, NY 10001",
+                "latitude": 40.7589,
+                "longitude": -73.9851,
+                "timestamp": datetime.now().isoformat(),
+                "verified": True,
+                "business_type": "Restaurant",
+                "additional_info": "Freshly made, contains nuts",
+                "expiry_hours": 6,
+                "id": "sample_1"
+            },
+            {
+                "name": "Sunrise Bakery",
+                "contact": "+1987654321",
+                "food_type": "Fresh Bread Loaves",
+                "quantity": 25,
+                "address": "456 Oak Avenue, Brooklyn, NY 11201",
+                "latitude": 40.6892,
+                "longitude": -73.9442,
+                "timestamp": datetime.now().isoformat(),
+                "verified": False,
+                "business_type": "Bakery",
+                "additional_info": "Various types: whole wheat, sourdough, rye",
+                "expiry_hours": 12,
+                "id": "sample_2"
+            },
+            {
+                "name": "Community Kitchen",
+                "contact": "+1555123456",
+                "food_type": "Mixed Vegetable Curry",
+                "quantity": 30,
+                "address": "789 Community Center Dr, Queens, NY 11354",
+                "latitude": 40.7282,
+                "longitude": -73.7949,
+                "timestamp": datetime.now().isoformat(),
+                "verified": True,
+                "business_type": "Catering",
+                "additional_info": "Vegan, gluten-free, served with rice",
+                "expiry_hours": 4,
+                "id": "sample_3"
+            }
+        ]
+        _memory_storage.extend(sample_posts)
+        print(f"Added {len(sample_posts)} sample posts")
